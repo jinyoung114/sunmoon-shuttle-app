@@ -1,6 +1,5 @@
-# SunMoon Shuttle App
-
-선문대학교 셔틀버스 실시간 위치 확인 앱입니다.
+# Shuttle App
+대학교 셔틀버스 실시간 위치 확인 앱입니다.
 
 기존 Python + Leaflet 기반 웹 시뮬레이션을 React Native 모바일 앱으로 이식하는 프로젝트입니다.
 
