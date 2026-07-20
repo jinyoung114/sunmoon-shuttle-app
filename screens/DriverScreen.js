@@ -8,6 +8,7 @@ export default function DriverScreen({ setScreen }) {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
   const subscriptionRef = useRef(null);
+  const lastSentAtRef = useRef(0);
 
   // 컴포넌트 언마운트 시 위치 추적 구독 해제
   useEffect(() => {
@@ -20,6 +21,49 @@ export default function DriverScreen({ setScreen }) {
     if (subscriptionRef.current) {
       subscriptionRef.current.remove();
       subscriptionRef.current = null;
+    }
+  };
+
+  const sendLocationToServer = async (coords, locationTimestamp) => {
+    const apiUrl = "http://192.168.219.107:8000/mapmatch";
+
+    const requestData = {
+      lat: coords.latitude,
+      lon: coords.longitude,
+      timestamp: new Date(locationTimestamp).toISOString(),
+      bus_id: "test_bus_001",
+      route_id: "route_001",
+      heading:
+        coords.heading !== null &&
+        coords.heading !== undefined &&
+        coords.heading >= 0
+          ? coords.heading
+          : 0,
+      speed:
+        coords.speed !== null &&
+        coords.speed !== undefined &&
+        coords.speed >= 0
+          ? coords.speed
+          : 0,
+    };
+
+    console.log("자동 GPS 전송:", requestData);
+
+    try {
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestData),
+      });
+
+      const result = await response.json();
+
+      console.log("자동 GPS API 응답:", result);
+    } catch (error) {
+      console.error("자동 GPS 전송 오류:", error);
+      setErrorMsg("GPS 서버 전송 중 오류가 발생했습니다.");
     }
   };
 
@@ -36,6 +80,7 @@ export default function DriverScreen({ setScreen }) {
     }
 
     setIsDriving(true);
+    lastSentAtRef.current = 0;
 
     // 2. 실시간 위치 추적 시작 (최고 신뢰도 네비게이션 모드 및 거리제한 0m)
     try {
@@ -46,8 +91,19 @@ export default function DriverScreen({ setScreen }) {
           distanceInterval: 0, // 0m (이동하지 않아도 매초 수신)
         },
         (newLocation) => {
+          const now = Date.now();
+
           setLocation(newLocation.coords);
-          setLastUpdated(new Date().toLocaleTimeString());
+          setLastUpdated(new Date(newLocation.timestamp).toLocaleTimeString());
+
+          if (now - lastSentAtRef.current >= 3000) {
+            lastSentAtRef.current = now;
+
+            sendLocationToServer(
+              newLocation.coords,
+              newLocation.timestamp
+            );
+          }
         }
       );
       subscriptionRef.current = subscription;
@@ -59,6 +115,7 @@ export default function DriverScreen({ setScreen }) {
 
   const handleStopDriving = () => {
     stopLocationTracking();
+    lastSentAtRef.current = 0;
     setIsDriving(false);
   };
 
@@ -66,6 +123,65 @@ export default function DriverScreen({ setScreen }) {
     stopLocationTracking();
     if (setScreen) {
       setScreen("home");
+    }
+  };
+
+  const handleApiTest = async () => {
+    if (!location) {
+      Alert.alert(
+        "GPS 정보 없음",
+        "먼저 운행 시작을 눌러 GPS 위치를 수신해주세요."
+      );
+      return;
+    }
+
+    const apiUrl = "http://192.168.219.107:8000/mapmatch";
+
+    const requestData = {
+      lat: location.latitude,
+      lon: location.longitude,
+      timestamp: new Date().toISOString(),
+      bus_id: "test_bus_001",
+      route_id: "route_001",
+      heading:
+        location.heading !== null &&
+        location.heading !== undefined &&
+        location.heading >= 0
+          ? location.heading
+          : 0,
+      speed:
+        location.speed !== null &&
+        location.speed !== undefined &&
+        location.speed >= 0
+          ? location.speed
+          : 0,
+    };
+
+    console.log("실제 GPS 전송 데이터:", requestData);
+
+    try {
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestData),
+      });
+
+      console.log("HTTP 상태 코드:", response.status);
+
+      const result = await response.json();
+
+      console.log("API 응답:", result);
+
+      Alert.alert("GPS 전송 성공", JSON.stringify(result, null, 2));
+    } catch (error) {
+      console.error("API 요청 오류:", error);
+
+      Alert.alert(
+        "API 요청 오류",
+        error?.message || "알 수 없는 오류가 발생했습니다."
+      );
     }
   };
 
@@ -154,6 +270,10 @@ export default function DriverScreen({ setScreen }) {
         disabled={!isDriving}
       >
         <Text style={styles.buttonText}>운행 종료</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity style={styles.apiTestButton} onPress={handleApiTest}>
+        <Text style={styles.buttonText}>API 연결 테스트</Text>
       </TouchableOpacity>
 
       <TouchableOpacity style={styles.backButton} onPress={handleGoHome}>
@@ -267,4 +387,11 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     fontSize: 15,
   },
-});
+  apiTestButton: {
+    backgroundColor: "#059669",
+    paddingVertical: 16,
+    borderRadius: 12,
+    marginBottom: 12,
+    alignItems: "center",
+  },
+});
