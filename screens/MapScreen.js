@@ -10,6 +10,7 @@ import { GPS_POINTS } from "../data/gpsRoute";
 export default function MapScreen() {
   const navigation = useNavigation();
   const [gpsIndex, setGpsIndex] = useState(0);
+  const [selectedStopId, setSelectedStopId] = useState(null); // 터치한 정류장 ID 저장용 state
 
   const roadLines = useMemo(() => {
     return roadNetwork.features
@@ -55,6 +56,7 @@ export default function MapScreen() {
           latitudeDelta: 0.035,
           longitudeDelta: 0.035,
         }}
+        onPress={() => setSelectedStopId(null)} // 지도 빈 곳 클릭 시 선택 해제
       >
         {roadLines.map((line, index) => (
           <Polyline
@@ -75,13 +77,15 @@ export default function MapScreen() {
 
         {STOPS.map((stop) => (
           <Marker
-            key={stop.id}
+            key={`${stop.id}-${selectedStopId === stop.id ? "active" : "inactive"}`}
             coordinate={{
               latitude: stop.latitude,
               longitude: stop.longitude,
             }}
             title={stop.name}
             description={stop.id}
+            onPress={() => setSelectedStopId(stop.id)}
+            pinColor={selectedStopId === stop.id ? "#EF4444" : "#003D7C"}
           />
         ))}
 
@@ -118,6 +122,24 @@ export default function MapScreen() {
         <Text style={styles.coordText}>
           위도: {busPosition.latitude.toFixed(6)} | 경도: {busPosition.longitude.toFixed(6)}
         </Text>
+
+        {/* 선택된 정류장 정보 동적 표시 카드 */}
+        {selectedStopId && (
+          <View style={styles.selectedStopContainer}>
+            <View style={styles.selectedStopBadge}>
+              <Text style={styles.selectedStopLabel}>선택됨</Text>
+            </View>
+            <Text style={styles.selectedStopName}>
+              {STOPS.find((s) => s.id === selectedStopId)?.name || selectedStopId}
+            </Text>
+            <TouchableOpacity
+              style={styles.clearButton}
+              onPress={() => setSelectedStopId(null)}
+            >
+              <Text style={styles.clearButtonText}>선택 해제</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
     </View>
   );
@@ -201,6 +223,45 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: "#9CA3AF",
     marginTop: 4,
+  },
+  selectedStopContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F1F5F9",
+    borderRadius: 10,
+    padding: 8,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+  },
+  selectedStopBadge: {
+    backgroundColor: "#003D7C",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  selectedStopLabel: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "bold",
+  },
+  selectedStopName: {
+    fontSize: 13,
+    fontWeight: "bold",
+    color: "#334155",
+    flex: 1,
+  },
+  clearButton: {
+    backgroundColor: "#E2E8F0",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  clearButtonText: {
+    color: "#475569",
+    fontSize: 11,
+    fontWeight: "600",
   },
   busIcon: {
     fontSize: 34,
