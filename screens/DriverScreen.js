@@ -25,7 +25,7 @@ export default function DriverScreen({ setScreen }) {
   };
 
   const sendLocationToServer = async (coords, locationTimestamp) => {
-    const apiUrl = "http://192.168.219.107:8000/mapmatch";
+    const apiUrl = "http://192.168.219.105:8000/mapmatch";
 
     const requestData = {
       lat: coords.latitude,
@@ -135,7 +135,7 @@ export default function DriverScreen({ setScreen }) {
       return;
     }
 
-    const apiUrl = "http://192.168.219.107:8000/mapmatch";
+    const apiUrl = "http://192.168.219.105:8000/mapmatch";
 
     const requestData = {
       lat: location.latitude,
@@ -174,7 +174,12 @@ export default function DriverScreen({ setScreen }) {
 
       console.log("API 응답:", result);
 
-      Alert.alert("GPS 전송 성공", JSON.stringify(result, null, 2));
+      Alert.alert(
+        "GPS 전송 성공",
+        `현재 노드: ${result.current_node}\n` +
+        `확정 노드: ${result.committed_node}\n` +
+        `확정 개수: ${result.committed_count}`
+      );
     } catch (error) {
       console.error("API 요청 오류:", error);
 
