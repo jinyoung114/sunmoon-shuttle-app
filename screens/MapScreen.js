@@ -5,13 +5,14 @@ import { useNavigation } from "@react-navigation/native";
 
 import roadNetwork from "../data/road_network.json";
 import { STOPS } from "../data/stops";
-import { GPS_POINTS } from "../data/gpsRoute";
+import { ref, onValue } from "firebase/database";
+import { database } from "../services/firebase";
 
 export default function MapScreen() {
   const navigation = useNavigation();
-  const [gpsIndex, setGpsIndex] = useState(0);
-  const [selectedStopId, setSelectedStopId] = useState(null); // 터치한 정류장 ID 저장용 state
-
+  const [busData, setBusData] = useState(null);
+  const [selectedStopId, setSelectedStopId] = useState(null);
+  
   const roadLines = useMemo(() => {
     return roadNetwork.features
       .filter((feature) => feature.geometry?.type === "LineString")
@@ -23,28 +24,34 @@ export default function MapScreen() {
       );
   }, []);
 
-  const passedGpsPath = useMemo(() => {
-    return GPS_POINTS.slice(0, gpsIndex + 1).map((point) => ({
-      latitude: point.latitude,
-      longitude: point.longitude,
-    }));
-  }, [gpsIndex]);
-
+    // Firebase에서 bus_001 위치 실시간 구독
   useEffect(() => {
-    const timer = setInterval(() => {
-      setGpsIndex((prev) => {
-        if (prev >= GPS_POINTS.length - 1) return 0;
-        return prev + 1;
-      });
-    }, 3000);
+    const busRef = ref(database, "busLocations/bus_001");
 
-    return () => clearInterval(timer);
+    const unsubscribe = onValue(busRef, (snapshot) => {
+      const data = snapshot.val();
+
+      if (data && data.lat != null && data.lon != null) {
+        setBusData(data);
+        console.log("[FIREBASE BUS LOCATION]", data);
+      } else {
+        setBusData(null);
+        console.log("[FIREBASE] bus_001 is not operating");
+      }
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  const busPosition = {
-    latitude: GPS_POINTS[gpsIndex].latitude,
-    longitude: GPS_POINTS[gpsIndex].longitude,
-  };
+  const busPosition = busData
+    ? {
+        latitude: busData.lat,
+        longitude: busData.lon,
+      }
+    : null;
+  
+
+  
 
   return (
     <View style={styles.container}>
@@ -67,13 +74,6 @@ export default function MapScreen() {
           />
         ))}
 
-        {passedGpsPath.length > 1 && (
-          <Polyline
-            coordinates={passedGpsPath}
-            strokeWidth={4}
-            strokeColor="#2F6FED"
-          />
-        )}
 
         {STOPS.map((stop) => (
           <Marker
@@ -89,13 +89,15 @@ export default function MapScreen() {
           />
         ))}
 
-        <Marker
-          coordinate={busPosition}
-          title="셔틀버스"
-          description={`GPS ${gpsIndex + 1} / ${GPS_POINTS.length}`}
-        >
-          <Text style={styles.busIcon}>🚌</Text>
-        </Marker>
+        {busPosition && (
+          <Marker
+            coordinate={busPosition}
+            title="셔틀버스"
+            description={busData?.route_id || "운행 중"}
+          >
+            <Text style={styles.busIcon}>🚌</Text>
+          </Marker>
+        )}
       </MapView>
 
       <View style={styles.infoBox}>
@@ -112,16 +114,21 @@ export default function MapScreen() {
         <View style={styles.statusContainer}>
           <View style={styles.statusBadge}>
             <View style={styles.statusDot} />
-            <Text style={styles.statusText}>운행중</Text>
+            <Text style={styles.statusText}>
+              {busData ? "운행중" : "운행 정보 없음"}
+            </Text>
           </View>
           <Text style={styles.gpsText}>
-            GPS 데이터: {gpsIndex + 1} / {GPS_POINTS.length}
+            {busData?.route_id || "현재 운행 중인 버스 없음"}
           </Text>
         </View>
 
-        <Text style={styles.coordText}>
-          위도: {busPosition.latitude.toFixed(6)} | 경도: {busPosition.longitude.toFixed(6)}
-        </Text>
+        {busPosition && (
+          <Text style={styles.coordText}>
+            위도: {busPosition.latitude.toFixed(6)} | 경도:{" "}
+            {busPosition.longitude.toFixed(6)}
+          </Text>
+        )}
 
         {/* 선택된 정류장 정보 동적 표시 카드 */}
         {selectedStopId && (
