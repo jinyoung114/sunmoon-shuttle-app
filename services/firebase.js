@@ -2,7 +2,7 @@ import { initializeApp } from "firebase/app";
 import { getDatabase } from "firebase/database";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyDXRYQgCOvRjLjrYAeTZm5yHrPFH1us2Gk",
+  apiKey: "",
   authDomain: "shuttlebusapp-ce380.firebaseapp.com",
   databaseURL: "https://shuttlebusapp-ce380-default-rtdb.asia-southeast1.firebasedatabase.app",
   projectId: "shuttlebusapp-ce380",
