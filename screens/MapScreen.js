@@ -1,81 +1,318 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { StyleSheet, View, Text, TouchableOpacity } from "react-native";
+import useFavoriteStops from "../hooks/useFavoriteStops";
+import styles, { headerInset, fitButtonOffset } from "../styles/MapScreen.styles";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { View, Text, TouchableOpacity, Keyboard, Image } from "react-native";
 import MapView, { Marker, Polyline } from "react-native-maps";
+import { useFonts } from "expo-font";
 import { useNavigation } from "@react-navigation/native";
 
-import roadNetwork from "../data/road_network.json";
-import { STOPS } from "../data/stops";
-import { ref, onValue } from "firebase/database";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import StopBottomSheet from "../components/StopBottomSheet";
+import { getSheetHeight } from "../styles/StopBottomSheet.styles";
+import { getStopRoutes, readActiveBuses } from "../utils/stopInfo";
+import StopSearch from "../components/StopSearch";
+import RouteSelector from "../components/RouteSelector";
+import { ALL_ROUTES_ID, ROUTES, normalizeRouteId, getRouteLabel, getBusIcon } from "../data/routes";
+import { ref, onValue, get } from "firebase/database";
 import { database } from "../services/firebase";
 
-export default function MapScreen() {
+export default function MapScreen({ route }) {
   const navigation = useNavigation();
-  const [busData, setBusData] = useState(null);
+  const { favoriteIds, busy: favoriteBusy, error: favoriteError, toggleFavorite } = useFavoriteStops();
+  const [fontsLoaded, fontError] = useFonts({
+    "ShuttleTitle-Bold": require("../assets/ShuttleTitle-Bold.ttf"),
+  });
+  useEffect(() => {
+    if (fontError) console.warn("[HEADER FONT]", fontError.message);
+  }, [fontError]);
+  const [buses, setBuses] = useState([]);
+  const [locationError, setLocationError] = useState(false);
+  const [firebaseStops, setFirebaseStops] = useState([]);
+  const [routeStopsById, setRouteStopsById] = useState({});
+  const [routeStopsErrors, setRouteStopsErrors] = useState({});
+  const [selectedRouteId, setSelectedRouteId] = useState(() =>
+    normalizeRouteId(route?.params?.routeId)
+  );
   const [selectedStopId, setSelectedStopId] = useState(null);
-  
-  const roadLines = useMemo(() => {
-    return roadNetwork.features
+  const insets = useSafeAreaInsets();
+  const mapRef = useRef(null);
+  const [mapReady, setMapReady] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [stopsLoaded, setStopsLoaded] = useState(false);
+  const [stopsError, setStopsError] = useState(false);
+  const [mapHeight, setMapHeight] = useState(0);
+  const sheetHeight = getSheetHeight(mapHeight);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState(false);
+  const refreshPending = useRef(false);
+  const busRevision = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const bottomOverlayHeightRef = useRef(0);
+  bottomOverlayHeightRef.current = selectedStopId ? sheetHeight : 0;
+
+  useEffect(() => {
+    setSelectedRouteId(normalizeRouteId(route?.params?.routeId));
+    setSelectedStopId(null);
+  }, [route?.params?.routeId]);
+
+  const visibleRoutes = useMemo(
+    () => selectedRouteId === ALL_ROUTES_ID
+      ? ROUTES
+      : ROUTES.filter((item) => item.id === selectedRouteId),
+    [selectedRouteId]
+  );
+
+  const roadLines = useMemo(() => visibleRoutes.flatMap((item) =>
+    item.roadNetwork.features
       .filter((feature) => feature.geometry?.type === "LineString")
-      .map((feature) =>
-        feature.geometry.coordinates.map(([lng, lat]) => ({
+      .map((feature, index) => ({
+        id: `${item.id}-${index}`,
+        color: item.color,
+        coordinates: feature.geometry.coordinates.map(([lng, lat]) => ({
           latitude: lat,
           longitude: lng,
-        }))
-      );
+        })),
+      }))
+  ), [visibleRoutes]);
+
+  // Firebase에서 전체 버스 위치를 실시간 구독합니다.
+  useEffect(() => {
+    const busRef = ref(database, "busLocations");
+    const unsubscribe = onValue(
+      busRef,
+      (snapshot) => {
+        busRevision.current += 1;
+        setBuses(readActiveBuses(snapshot));
+        setLocationError(false);
+      },
+      (error) => {
+        busRevision.current += 1;
+        setBuses([]);
+        setLocationError(true);
+        console.warn("[FIREBASE BUS LOCATIONS]", error.code);
+      }
+    );
+
+    return () => unsubscribe();
   }, []);
 
-    // Firebase에서 bus_001 위치 실시간 구독
+  // Firebase에서 전체 정류장 정보를 실시간 구독합니다.
   useEffect(() => {
-    const busRef = ref(database, "busLocations/bus_001");
+    const stopsRef = ref(database, "stops");
 
-    const unsubscribe = onValue(busRef, (snapshot) => {
-      const data = snapshot.val();
+    const unsubscribe = onValue(stopsRef, (snapshot) => {
+      const nextStops = [];
 
-      if (data && data.lat != null && data.lon != null) {
-        setBusData(data);
-        console.log("[FIREBASE BUS LOCATION]", data);
-      } else {
-        setBusData(null);
-        console.log("[FIREBASE] bus_001 is not operating");
-      }
+      snapshot.forEach((child) => {
+        const data = child.val();
+
+        if (
+          Number.isFinite(data?.latitude) &&
+          Number.isFinite(data?.longitude) &&
+          Math.abs(data.latitude) <= 90 && Math.abs(data.longitude) <= 180
+        ) {
+          nextStops.push({
+            id: child.key,
+            name: data.name,
+            latitude: data.latitude,
+            longitude: data.longitude,
+          });
+        }
+      });
+
+      setFirebaseStops(nextStops);
+      setStopsLoaded(true);
+      setStopsError(false);
+    }, (error) => {
+      setFirebaseStops([]);
+      setStopsLoaded(true);
+      setStopsError(true);
+      console.warn("[FIREBASE STOPS]", error.code);
     });
 
     return () => unsubscribe();
   }, []);
 
-  const busPosition = busData
-    ? {
-        latitude: busData.lat,
-        longitude: busData.lon,
+  // 기존 RTDB 경로를 유지하고 노선별로 결과를 보관합니다.
+  useEffect(() => {
+    const unsubscribes = ROUTES.map((item) => onValue(
+      ref(database, `routes/${item.id}/directions/outbound/stops`),
+      (snapshot) => {
+        const stopIds = [];
+        snapshot.forEach((child) => {
+          const stopId = child.val();
+          if (typeof stopId === "string") stopIds.push(stopId);
+        });
+        setRouteStopsById((previous) => ({ ...previous, [item.id]: stopIds }));
+        setRouteStopsErrors((previous) => ({ ...previous, [item.id]: false }));
+      },
+      (error) => {
+        setRouteStopsById((previous) => ({ ...previous, [item.id]: [] }));
+        setRouteStopsErrors((previous) => ({ ...previous, [item.id]: true }));
+        console.warn("[FIREBASE ROUTE STOPS]", item.id, error.code);
       }
-    : null;
-  
+    ));
+    return () => unsubscribes.forEach((unsubscribe) => unsubscribe());
+  }, []);
 
-  
+  const visibleStops = useMemo(() => {
+    const stopById = new Map(firebaseStops.map((stop) => [stop.id, stop]));
+    const stopIds = new Set(visibleRoutes.flatMap((item) => routeStopsById[item.id] ?? []));
+    return [...stopIds].map((id) => stopById.get(id)).filter(Boolean);
+  }, [firebaseStops, routeStopsById, visibleRoutes]);
+
+  useEffect(() => {
+    if (selectedStopId && !visibleStops.some((stop) => stop.id === selectedStopId)) {
+      setSelectedStopId(null);
+    }
+  }, [visibleStops, selectedStopId]);
+
+  const visibleBuses = useMemo(
+    () => selectedRouteId === ALL_ROUTES_ID
+      ? buses
+      : buses.filter((bus) => bus.route_id === selectedRouteId),
+    [buses, selectedRouteId]
+  );
+  const routeStopsError = visibleRoutes.some((item) => routeStopsErrors[item.id]);
+
+  const selectedStop = firebaseStops.find((stop) => stop.id === selectedStopId);
+  const stopRoutes = useMemo(() => getStopRoutes(selectedStopId, ROUTES, routeStopsById), [selectedStopId, routeStopsById]);
+  const stopRoutesLoading = ROUTES.some((item) => !(item.id in routeStopsById));
+  const stopRoutesError = ROUTES.some((item) => routeStopsErrors[item.id]);
+  const closeStop = useCallback(() => setSelectedStopId(null), []);
+
+  const refreshBusLocations = async () => {
+    if (refreshPending.current) return;
+    refreshPending.current = true;
+    setRefreshing(true);
+    setRefreshError(false);
+    const revision = busRevision.current;
+    try {
+      const snapshot = await get(ref(database, "busLocations"));
+      // Do not overwrite a newer realtime event with an older refresh result.
+      if (mounted.current && busRevision.current === revision) {
+        setBuses(readActiveBuses(snapshot));
+        setLocationError(false);
+      }
+    } catch (error) {
+      if (mounted.current) setRefreshError(true);
+      console.warn("[FIREBASE REFRESH]", error.code);
+    } finally {
+      refreshPending.current = false;
+      if (mounted.current) setRefreshing(false);
+    }
+  };
+
+  const handleRouteSelect = (routeId) => {
+    setSelectedRouteId(routeId);
+    setSelectedStopId(null);
+    setMenuOpen(false);
+    setSearchQuery("");
+    setSearchFocused(false);
+    Keyboard.dismiss();
+  };
+
+  const fitRoute = useCallback(() => {
+    const coordinates = roadLines.flatMap((line) => line.coordinates);
+    if (!mapReady || coordinates.length === 0) return;
+    mapRef.current?.fitToCoordinates(coordinates, {
+      edgePadding: { top: 90, right: 36, bottom: bottomOverlayHeightRef.current + 36, left: 36 },
+      animated: true,
+    });
+  }, [mapReady, roadLines]);
+
+  // GPS 갱신 때마다 카메라를 이동하지 않고, 노선 변경 시에만 전체 경로를 맞춥니다.
+  useEffect(() => { fitRoute(); }, [fitRoute]);
+
+  const selectStop = (stop) => {
+    setSelectedStopId(stop.id);
+    setSearchQuery("");
+    setSearchFocused(false);
+    setMenuOpen(false);
+    Keyboard.dismiss();
+  };
+
+  // Position the selected stop above the sheet after its size is known.
+  useEffect(() => {
+    if (!selectedStop || !mapReady || mapHeight <= 0) return;
+    mapRef.current?.fitToCoordinates([selectedStop], {
+      edgePadding: { top: 80, right: 40, bottom: sheetHeight + 20, left: 40 },
+      animated: true,
+    });
+  }, [selectedStop, mapReady, mapHeight, sheetHeight]);
+
+  const dismissOverlays = () => {
+    setMenuOpen(false);
+    setSearchFocused(false);
+    Keyboard.dismiss();
+  };
 
   return (
     <View style={styles.container}>
+      <View style={[styles.brandHeader, headerInset(insets.top)]}>
+        <View style={styles.brandContent}>
+        <Image
+          source={require("../assets/school-symbol-fixed.png")}
+          style={styles.schoolSymbol}
+          resizeMode="contain"
+        />
+        <Text style={[styles.schoolTitle, fontsLoaded && styles.schoolTitleFont]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+          선문대학교 셔틀버스
+        </Text>
+        </View>
+      </View>
+      <View style={styles.mapContainer}>
+      <View style={styles.searchArea}>
+        <StopSearch
+          favoriteIds={favoriteIds}
+          stops={visibleStops}
+          query={searchQuery}
+          focused={searchFocused}
+          loading={!stopsLoaded || visibleRoutes.some((item) => !(item.id in routeStopsById))}
+          error={stopsError || routeStopsError}
+          onChange={setSearchQuery}
+          onFocus={() => { setSearchFocused(true); setMenuOpen(false); }}
+          onClose={() => { setSearchFocused(false); Keyboard.dismiss(); }}
+          onSelect={selectStop}
+        />
+      </View>
+      <View style={styles.mapArea} onLayout={(event) => setMapHeight(event.nativeEvent.layout.height)}>
       <MapView
+        ref={mapRef}
+        onMapReady={() => setMapReady(true)}
+        showsPointsOfInterest={false}
+        showsCompass={false}
+        showsBuildings={false}
         style={styles.map}
         initialRegion={{
-          latitude: 36.7955,
-          longitude: 127.0875,
-          latitudeDelta: 0.035,
-          longitudeDelta: 0.035,
+          latitude: 36.799,
+          longitude: 127.072,
+          latitudeDelta: 0.015,
+          longitudeDelta: 0.015,
         }}
-        onPress={() => setSelectedStopId(null)} // 지도 빈 곳 클릭 시 선택 해제
+        onPress={(event) => {
+          if (event.nativeEvent?.action === "marker-press") return;
+          dismissOverlays(); closeStop();
+        }}
       >
-        {roadLines.map((line, index) => (
+        {roadLines.map((line) => (
           <Polyline
-            key={`road-${index}`}
-            coordinates={line}
-            strokeWidth={2}
-            strokeColor="#D1D5DB"
+            key={line.id}
+            coordinates={line.coordinates}
+            strokeWidth={4}
+            strokeColor={line.color}
           />
         ))}
 
 
-        {STOPS.map((stop) => (
+
+        {visibleStops.map((stop) => (
           <Marker
             key={`${stop.id}-${selectedStopId === stop.id ? "active" : "inactive"}`}
             coordinate={{
@@ -84,193 +321,61 @@ export default function MapScreen() {
             }}
             title={stop.name}
             description={stop.id}
-            onPress={() => setSelectedStopId(stop.id)}
-            pinColor={selectedStopId === stop.id ? "#EF4444" : "#003D7C"}
-          />
+            onPress={(event) => {
+              event.stopPropagation?.();
+              selectStop(stop);
+            }}
+            anchor={{ x: 0.5, y: 0.5 }}
+          >
+            <Image
+              source={require("../assets/bus-stop.png")}
+              style={[styles.stopIcon, selectedStopId === stop.id && styles.selectedStopIcon]}
+              resizeMode="contain"
+            />
+          </Marker>
         ))}
 
-        {busPosition && (
+
+        {visibleBuses.map((bus) => (
           <Marker
-            coordinate={busPosition}
-            title="셔틀버스"
-            description={busData?.route_id || "운행 중"}
+            key={`bus-${bus.bus_id}`}
+            coordinate={{ latitude: bus.lat, longitude: bus.lon }}
+            title={`셔틀버스 ${bus.bus_id}`}
+            description={getRouteLabel(bus.route_id)}
+            anchor={{ x: 0.5, y: 0.5 }}
           >
-            <Text style={styles.busIcon}>🚌</Text>
+            <Image source={getBusIcon(bus.route_id)} resizeMode="contain"
+              style={styles.busMarker} />
           </Marker>
-        )}
+        ))}
       </MapView>
 
-      <View style={styles.infoBox}>
-        <View style={styles.header}>
-          <Text style={styles.title}>실시간 셔틀 위치</Text>
-          <TouchableOpacity
-            style={styles.scheduleButton}
-            onPress={() => navigation.navigate("Schedule")}
-          >
-            <Text style={styles.scheduleButtonText}>📅 시간표</Text>
-          </TouchableOpacity>
-        </View>
+      {menuOpen && (
+        <TouchableOpacity style={styles.menuBackdrop} activeOpacity={1}
+          accessibilityLabel="노선 목록 닫기" accessibilityRole="button" onPress={() => setMenuOpen(false)} />
+      )}
+      <View style={styles.routeSelector}>
+        <RouteSelector selectedRouteId={selectedRouteId} onSelect={handleRouteSelect}
+          open={menuOpen} buses={buses} locationError={locationError}
+          onToggle={() => { setMenuOpen(!menuOpen); setSearchFocused(false); Keyboard.dismiss(); }} />
+      </View>
+      <TouchableOpacity style={[styles.fitButton, fitButtonOffset(selectedStop ? sheetHeight : 0)]}
+        accessibilityRole="button" accessibilityLabel="선택 노선 전체 보기"
+        onPress={() => { dismissOverlays(); fitRoute(); }}>
+        <Text style={styles.fitIcon}>⌖</Text>
+      </TouchableOpacity>
 
-        <View style={styles.statusContainer}>
-          <View style={styles.statusBadge}>
-            <View style={styles.statusDot} />
-            <Text style={styles.statusText}>
-              {busData ? "운행중" : "운행 정보 없음"}
-            </Text>
-          </View>
-          <Text style={styles.gpsText}>
-            {busData?.route_id || "현재 운행 중인 버스 없음"}
-          </Text>
-        </View>
-
-        {busPosition && (
-          <Text style={styles.coordText}>
-            위도: {busPosition.latitude.toFixed(6)} | 경도:{" "}
-            {busPosition.longitude.toFixed(6)}
-          </Text>
-        )}
-
-        {/* 선택된 정류장 정보 동적 표시 카드 */}
-        {selectedStopId && (
-          <View style={styles.selectedStopContainer}>
-            <View style={styles.selectedStopBadge}>
-              <Text style={styles.selectedStopLabel}>선택됨</Text>
-            </View>
-            <Text style={styles.selectedStopName}>
-              {STOPS.find((s) => s.id === selectedStopId)?.name || selectedStopId}
-            </Text>
-            <TouchableOpacity
-              style={styles.clearButton}
-              onPress={() => setSelectedStopId(null)}
-            >
-              <Text style={styles.clearButtonText}>선택 해제</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+      {selectedStop && <StopBottomSheet
+        stop={selectedStop} routes={stopRoutes} buses={buses}
+        isFavorite={favoriteIds.includes(selectedStop.id)} favoriteBusy={favoriteBusy} favoriteError={favoriteError}
+        onToggleFavorite={() => toggleFavorite(selectedStop.id)}
+        loading={stopRoutesLoading} error={stopRoutesError || stopsError}
+        locationError={locationError} refreshing={refreshing} refreshError={refreshError}
+        height={sheetHeight} onClose={closeStop}
+        onSchedule={() => navigation.navigate("Schedule")} onRefresh={refreshBusLocations}
+      />}
+      </View>
       </View>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#F3F4F6",
-  },
-  map: {
-    flex: 1,
-  },
-  infoBox: {
-    position: "absolute",
-    left: 16,
-    right: 16,
-    bottom: 20,
-    backgroundColor: "rgba(255, 255, 255, 0.95)",
-    padding: 18,
-    borderRadius: 20,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 10,
-    elevation: 8,
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 10,
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: "#111827",
-  },
-  scheduleButton: {
-    backgroundColor: "#003D7C",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-  },
-  scheduleButtonText: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "bold",
-  },
-  statusContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 6,
-  },
-  statusBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#E0F2FE",
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 12,
-    marginRight: 8,
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#0284C7",
-    marginRight: 4,
-  },
-  statusText: {
-    fontSize: 11,
-    color: "#0284C7",
-    fontWeight: "bold",
-  },
-  gpsText: {
-    fontSize: 12,
-    color: "#4B5563",
-  },
-  coordText: {
-    fontSize: 11,
-    color: "#9CA3AF",
-    marginTop: 4,
-  },
-  selectedStopContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#F1F5F9",
-    borderRadius: 10,
-    padding: 8,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-  },
-  selectedStopBadge: {
-    backgroundColor: "#003D7C",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-    marginRight: 8,
-  },
-  selectedStopLabel: {
-    color: "#FFFFFF",
-    fontSize: 10,
-    fontWeight: "bold",
-  },
-  selectedStopName: {
-    fontSize: 13,
-    fontWeight: "bold",
-    color: "#334155",
-    flex: 1,
-  },
-  clearButton: {
-    backgroundColor: "#E2E8F0",
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  clearButtonText: {
-    color: "#475569",
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  busIcon: {
-    fontSize: 34,
-  },
-});
