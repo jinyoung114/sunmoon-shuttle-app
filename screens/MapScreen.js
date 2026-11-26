@@ -1,3 +1,4 @@
+import useFavoriteStops from "../hooks/useFavoriteStops";
 import styles, { headerInset, fitButtonOffset } from "../styles/MapScreen.styles";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, TouchableOpacity, Keyboard, Image } from "react-native";
@@ -6,14 +7,18 @@ import { useFonts } from "expo-font";
 import { useNavigation } from "@react-navigation/native";
 
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import StopBottomSheet from "../components/StopBottomSheet";
+import { getSheetHeight } from "../styles/StopBottomSheet.styles";
+import { getStopRoutes, readActiveBuses } from "../utils/stopInfo";
 import StopSearch from "../components/StopSearch";
 import RouteSelector from "../components/RouteSelector";
 import { ALL_ROUTES_ID, ROUTES, normalizeRouteId, getRouteLabel, getBusIcon } from "../data/routes";
-import { ref, onValue } from "firebase/database";
+import { ref, onValue, get } from "firebase/database";
 import { database } from "../services/firebase";
 
 export default function MapScreen({ route }) {
   const navigation = useNavigation();
+  const { favoriteIds, busy: favoriteBusy, error: favoriteError, toggleFavorite } = useFavoriteStops();
   const [fontsLoaded, fontError] = useFonts({
     "ShuttleTitle-Bold": require("../assets/ShuttleTitle-Bold.ttf"),
   });
@@ -37,9 +42,19 @@ export default function MapScreen({ route }) {
   const [searchFocused, setSearchFocused] = useState(false);
   const [stopsLoaded, setStopsLoaded] = useState(false);
   const [stopsError, setStopsError] = useState(false);
-  const [infoHeight, setInfoHeight] = useState(140);
-  const infoHeightRef = useRef(infoHeight);
-  infoHeightRef.current = infoHeight;
+  const [mapHeight, setMapHeight] = useState(0);
+  const sheetHeight = getSheetHeight(mapHeight);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState(false);
+  const refreshPending = useRef(false);
+  const busRevision = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const bottomOverlayHeightRef = useRef(0);
+  bottomOverlayHeightRef.current = selectedStopId ? sheetHeight : 0;
 
   useEffect(() => {
     setSelectedRouteId(normalizeRouteId(route?.params?.routeId));
@@ -72,23 +87,12 @@ export default function MapScreen({ route }) {
     const unsubscribe = onValue(
       busRef,
       (snapshot) => {
-        const nextBuses = [];
-        snapshot.forEach((child) => {
-          const data = child.val();
-          if (
-            data?.trip_active === true &&
-            Number.isFinite(data.lat) &&
-            Number.isFinite(data.lon) &&
-            Math.abs(data.lat) <= 90 &&
-            Math.abs(data.lon) <= 180
-          ) {
-            nextBuses.push({ ...data, bus_id: child.key });
-          }
-        });
-        setBuses(nextBuses);
+        busRevision.current += 1;
+        setBuses(readActiveBuses(snapshot));
         setLocationError(false);
       },
       (error) => {
+        busRevision.current += 1;
         setBuses([]);
         setLocationError(true);
         console.warn("[FIREBASE BUS LOCATIONS]", error.code);
@@ -175,8 +179,35 @@ export default function MapScreen({ route }) {
       : buses.filter((bus) => bus.route_id === selectedRouteId),
     [buses, selectedRouteId]
   );
-  const routeLabel = getRouteLabel(selectedRouteId);
   const routeStopsError = visibleRoutes.some((item) => routeStopsErrors[item.id]);
+
+  const selectedStop = firebaseStops.find((stop) => stop.id === selectedStopId);
+  const stopRoutes = useMemo(() => getStopRoutes(selectedStopId, ROUTES, routeStopsById), [selectedStopId, routeStopsById]);
+  const stopRoutesLoading = ROUTES.some((item) => !(item.id in routeStopsById));
+  const stopRoutesError = ROUTES.some((item) => routeStopsErrors[item.id]);
+  const closeStop = useCallback(() => setSelectedStopId(null), []);
+
+  const refreshBusLocations = async () => {
+    if (refreshPending.current) return;
+    refreshPending.current = true;
+    setRefreshing(true);
+    setRefreshError(false);
+    const revision = busRevision.current;
+    try {
+      const snapshot = await get(ref(database, "busLocations"));
+      // Do not overwrite a newer realtime event with an older refresh result.
+      if (mounted.current && busRevision.current === revision) {
+        setBuses(readActiveBuses(snapshot));
+        setLocationError(false);
+      }
+    } catch (error) {
+      if (mounted.current) setRefreshError(true);
+      console.warn("[FIREBASE REFRESH]", error.code);
+    } finally {
+      refreshPending.current = false;
+      if (mounted.current) setRefreshing(false);
+    }
+  };
 
   const handleRouteSelect = (routeId) => {
     setSelectedRouteId(routeId);
@@ -191,7 +222,7 @@ export default function MapScreen({ route }) {
     const coordinates = roadLines.flatMap((line) => line.coordinates);
     if (!mapReady || coordinates.length === 0) return;
     mapRef.current?.fitToCoordinates(coordinates, {
-      edgePadding: { top: 90, right: 36, bottom: infoHeightRef.current + 36, left: 36 },
+      edgePadding: { top: 90, right: 36, bottom: bottomOverlayHeightRef.current + 36, left: 36 },
       animated: true,
     });
   }, [mapReady, roadLines]);
@@ -205,11 +236,16 @@ export default function MapScreen({ route }) {
     setSearchFocused(false);
     setMenuOpen(false);
     Keyboard.dismiss();
-    mapRef.current?.fitToCoordinates([stop], {
-      edgePadding: { top: 90, right: 48, bottom: infoHeightRef.current + 80, left: 48 },
+  };
+
+  // Position the selected stop above the sheet after its size is known.
+  useEffect(() => {
+    if (!selectedStop || !mapReady || mapHeight <= 0) return;
+    mapRef.current?.fitToCoordinates([selectedStop], {
+      edgePadding: { top: 80, right: 40, bottom: sheetHeight + 20, left: 40 },
       animated: true,
     });
-  };
+  }, [selectedStop, mapReady, mapHeight, sheetHeight]);
 
   const dismissOverlays = () => {
     setMenuOpen(false);
@@ -231,8 +267,10 @@ export default function MapScreen({ route }) {
         </Text>
         </View>
       </View>
+      <View style={styles.mapContainer}>
       <View style={styles.searchArea}>
         <StopSearch
+          favoriteIds={favoriteIds}
           stops={visibleStops}
           query={searchQuery}
           focused={searchFocused}
@@ -244,7 +282,7 @@ export default function MapScreen({ route }) {
           onSelect={selectStop}
         />
       </View>
-      <View style={styles.mapArea}>
+      <View style={styles.mapArea} onLayout={(event) => setMapHeight(event.nativeEvent.layout.height)}>
       <MapView
         ref={mapRef}
         onMapReady={() => setMapReady(true)}
@@ -258,7 +296,10 @@ export default function MapScreen({ route }) {
           latitudeDelta: 0.015,
           longitudeDelta: 0.015,
         }}
-        onPress={() => { dismissOverlays(); setSelectedStopId(null); }}
+        onPress={(event) => {
+          if (event.nativeEvent?.action === "marker-press") return;
+          dismissOverlays(); closeStop();
+        }}
       >
         {roadLines.map((line) => (
           <Polyline
@@ -288,10 +329,7 @@ export default function MapScreen({ route }) {
           >
             <Image
               source={require("../assets/bus-stop.png")}
-              style={{
-                width: selectedStopId === stop.id ? 40 : 30,
-                height: selectedStopId === stop.id ? 40 : 30,
-              }}
+              style={[styles.stopIcon, selectedStopId === stop.id && styles.selectedStopIcon]}
               resizeMode="contain"
             />
           </Marker>
@@ -321,63 +359,21 @@ export default function MapScreen({ route }) {
           open={menuOpen} buses={buses} locationError={locationError}
           onToggle={() => { setMenuOpen(!menuOpen); setSearchFocused(false); Keyboard.dismiss(); }} />
       </View>
-      <TouchableOpacity style={[styles.fitButton, fitButtonOffset(infoHeight)]}
+      <TouchableOpacity style={[styles.fitButton, fitButtonOffset(selectedStop ? sheetHeight : 0)]}
         accessibilityRole="button" accessibilityLabel="선택 노선 전체 보기"
         onPress={() => { dismissOverlays(); fitRoute(); }}>
         <Text style={styles.fitIcon}>⌖</Text>
       </TouchableOpacity>
 
-      <View style={styles.infoBox} onLayout={(event) => setInfoHeight(event.nativeEvent.layout.height)}>
-        <View style={styles.header}>
-          <Text style={styles.title}>실시간 셔틀 위치</Text>
-          <TouchableOpacity
-            style={styles.scheduleButton}
-            onPress={() => navigation.navigate("Schedule")}
-          >
-            <Text style={styles.scheduleButtonText}>📅 시간표</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.statusContainer}>
-          <View style={styles.statusBadge}>
-            <View style={styles.statusDot} />
-            <Text style={styles.statusText}>
-              {locationError ? "위치 수신 오류" : visibleBuses.length > 0 ? `운행중 ${visibleBuses.length}대` : "운행 정보 없음"}
-            </Text>
-          </View>
-          <Text style={styles.gpsText} numberOfLines={1}>
-            {locationError ? "위치를 불러오지 못했습니다" : routeLabel || "현재 표시할 버스 위치 없음"}
-          </Text>
-        </View>
-
-        {routeStopsError && (
-          <Text style={styles.dataErrorText}>일부 노선의 정류장을 불러오지 못했습니다.</Text>
-        )}
-
-        {visibleBuses.length === 1 && (
-          <Text style={styles.coordText}>
-            위도: {visibleBuses[0].lat.toFixed(6)} | 경도:{" "}
-            {visibleBuses[0].lon.toFixed(6)}
-          </Text>
-        )}
-
-        {/* 선택된 정류장 정보 동적 표시 카드 */}
-        {selectedStopId && (
-          <View style={styles.selectedStopContainer}>
-            <View style={styles.selectedStopBadge}>
-              <Text style={styles.selectedStopLabel}>선택됨</Text>
-            </View>
-            <Text style={styles.selectedStopName}>
-              {firebaseStops.find((s) => s.id === selectedStopId)?.name || selectedStopId}
-            </Text>
-            <TouchableOpacity
-              style={styles.clearButton}
-              onPress={() => setSelectedStopId(null)}
-            >
-              <Text style={styles.clearButtonText}>선택 해제</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+      {selectedStop && <StopBottomSheet
+        stop={selectedStop} routes={stopRoutes} buses={buses}
+        isFavorite={favoriteIds.includes(selectedStop.id)} favoriteBusy={favoriteBusy} favoriteError={favoriteError}
+        onToggleFavorite={() => toggleFavorite(selectedStop.id)}
+        loading={stopRoutesLoading} error={stopRoutesError || stopsError}
+        locationError={locationError} refreshing={refreshing} refreshError={refreshError}
+        height={sheetHeight} onClose={closeStop}
+        onSchedule={() => navigation.navigate("Schedule")} onRefresh={refreshBusLocations}
+      />}
       </View>
       </View>
     </View>

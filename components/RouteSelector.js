@@ -16,7 +16,7 @@ export default function RouteSelector({ selectedRouteId, onSelect, open, onToggl
           <Text style={styles.count}>{locationError ? "위치 수신 오류" : `${countFor(selectedRouteId)}대 운행 중`}</Text>
         </View>
         <Text style={styles.chevron}>{open ? "⌃" : "⌄"}</Text>
-        
+
       </TouchableOpacity>
       {open && <ScrollView style={styles.menu} keyboardShouldPersistTaps="handled">
         {ROUTE_OPTIONS.map((item) => (
